@@ -1,5 +1,20 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 
+/**
+ * Models to attempt using, in order of priority.
+ * We prioritize newer/faster models.
+ */
+const MODELS_TO_TRY = [
+    "gemini-2.5-flash",
+    "gemini-2.5-pro",
+    "gemini-2.0-flash"
+];
+
+/**
+ * Converts a File object to a GoogleGenerativeAI Part object.
+ * @param {File} file 
+ * @returns {Promise<Object>}
+ */
 const fileToPart = (file) => {
     return new Promise((resolve, reject) => {
         const reader = new FileReader();
@@ -17,6 +32,11 @@ const fileToPart = (file) => {
     });
 };
 
+/**
+ * Lists available models associated with the API key.
+ * @param {string} apiKey 
+ * @returns {Promise<Array>} List of models
+ */
 export async function listAvailableModels(apiKey) {
     try {
         const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`);
@@ -31,54 +51,68 @@ export async function listAvailableModels(apiKey) {
     }
 }
 
-export async function extractContentFromFiles(apiKey, files) {
+/**
+ * Extracts content from uploaded files using Gemini models.
+ * Retries with fallback models if the primary one fails.
+ * 
+ * @param {string} apiKey 
+ * @param {File[]} files 
+ * @param {'docx'|'excel'} format 
+ * @returns {Promise<string>} Extracted text or JSON string
+ */
+export async function extractContentFromFiles(apiKey, files, format = 'docx') {
     const genAI = new GoogleGenerativeAI(apiKey);
-
-    // Prioritize 2.5 flash/pro, then 2.0.
-    const modelsToTry = [
-        "gemini-2.5-flash",
-        "gemini-2.5-pro",
-        "gemini-2.0-flash"
-    ];
-
     let lastError = null;
 
-    for (const modelName of modelsToTry) {
+    for (const modelName of MODELS_TO_TRY) {
         try {
-            console.log(`Attempting to use model: ${modelName}`);
-
-            // Explicitly getting model (validate availability if possible?)
-            // The SDK doesn't validate until you call generateContent usually.
+            console.log(`Attempting generation with model: ${modelName}`);
             const model = genAI.getGenerativeModel({ model: modelName });
-
             const fileParts = await Promise.all(files.map(fileToPart));
 
-            const prompt = `
-      You are an expert Math assistant. Your task is to extract questions and mathematical equations entirely and accurately from the provided images of question papers.
-      
-      Rules:
-      1. Extract all text exactly as it appears.
-      2. For mathematical equations, represent them in standard LaTeX format enclosed in single dollar signs like $E = mc^2$.
-         - USE standard LaTeX commands: \\frac{a}{b}, x^2, x_i, \\sqrt{x}, etc.
-         - Do NOT use double dollar signs $$.
-      3. For fractions, ALWAYS use \\frac{numerator}{denominator}.
-      4. Maintain the question structure/numbering.
-      5. Do NOT output markdown code fences. Just raw text.
-      `;
+            const prompt = format === 'excel'
+                ? getExcelPrompt()
+                : getMathPrompt();
 
             const result = await model.generateContent([prompt, ...fileParts]);
-            const response = await result.response;
+            const response = result.response;
             return response.text();
-        } catch (error) {
-            console.warn(`Failed with model ${modelName}:`, error);
-            lastError = error;
 
-            // If it's a 404 (Not Found), it means this specific model isn't available for this key.
-            // We continue to the next model.
-            // If it's a 400 (InvalidArgument) or 403 (Permission), we might want to stop or also try others?
-            // For now, continue loop.
+        } catch (error) {
+            console.warn(`Model ${modelName} failed, retrying with next available...`, error);
+            lastError = error;
+            // Continue to next model in the list
         }
     }
 
-    throw lastError || new Error("All model attempts failed. Please check your API key.");
+    throw lastError || new Error("All model attempts failed. Please verify your API key and connection.");
+}
+
+function getExcelPrompt() {
+    return `
+    You are an expert Data Entry assistant. Your task is to extract tabular data and text from provided images into a structured JSON format.
+
+    Rules:
+    1. Identify tables, lists, or structured data in the image.
+    2. Extract the content into a JSON array of arrays, representing rows and columns.
+       Example: [ ["Header 1", "Header 2"], ["Row 1 Col 1", "Row 1 Col 2"] ]
+    3. Do NOT include complex mathematical equations. If minor math is present, treat it as plain text.
+    4. If there is no clear table, try to structure the text logically into rows.
+    5. Do NOT output markdown code fences. Just raw JSON.
+    `;
+}
+
+function getMathPrompt() {
+    return `
+    You are an expert Math assistant. Your task is to extract questions and mathematical equations entirely and accurately from the provided images of question papers.
+    
+    Rules:
+    1. Extract all text exactly as it appears.
+    2. For mathematical equations, represent them in standard LaTeX format enclosed in single dollar signs like $E = mc^2$.
+       - USE standard LaTeX commands: \\frac{a}{b}, x^2, x_i, \\sqrt{x}, etc.
+       - Do NOT use double dollar signs $$.
+    3. For fractions, ALWAYS use \\frac{numerator}{denominator}.
+    4. Maintain the question structure/numbering.
+    5. Do NOT output markdown code fences. Just raw text.
+    `;
 }

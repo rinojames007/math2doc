@@ -1,7 +1,9 @@
 import { Document, Packer, Paragraph, TextRun, Math, MathRun, MathFraction, MathSuperScript, MathSubScript, MathRadical } from "docx";
 import { saveAs } from "file-saver";
 
-// Map common LaTeX symbols to Unicode for display in Math runs
+/**
+ * Mapping of LaTeX symbols to their Unicode equivalents for display in Math runs.
+ */
 const LATEX_SYMBOLS = {
     '\\alpha': 'α', '\\beta': 'β', '\\gamma': 'γ', '\\theta': 'θ', '\\pi': 'π', '\\sigma': 'σ',
     '\\phi': 'φ', '\\Phi': 'Φ', '\\delta': 'δ', '\\lambda': 'λ', '\\mu': 'μ',
@@ -13,30 +15,30 @@ const LATEX_SYMBOLS = {
     '\\triangle': '△', '\\cong': '≅', '\\sim': '∽', '\\parallel': '∥', '\\perp': '⊥',
     '\\cup': '∪', '\\cap': '∩', '\\in': '∈', '\\subset': '⊂', '\\supset': '⊃',
     '\\forall': '∀', '\\exists': '∃',
-    '\\sqrt': '', // Special case
-    '\\frac': '', // Special case
+    '\\sqrt': '',
+    '\\frac': '',
 };
 
-// Helper: check if a char is a "single unit" for super/subscript purposes
-// (simple approximation)
-function isSingleChar(str) {
-    return str.length === 1 && str.match(/[a-zA-Z0-9]/);
-}
-
+/**
+ * Parses a LaTeX string into an array of Docx Math nodes.
+ * @param {string} latex 
+ * @returns {Array} Array of docx math objects
+ */
 function parseLatexNodes(latex) {
     const nodes = [];
     let i = 0;
 
-    // Helper to get text or group
-    // Returns { content: "...", endIndex: N, isGroup: boolean }
+    /**
+     * Extracts the next logical unit from the latex string.
+     * @param {number} idx 
+     * @returns {{content: string, endIndex: number, isGroup: boolean} | null}
+     */
     const getNextUnit = (idx) => {
         if (idx >= latex.length) return null;
         if (latex[idx] === '{') {
             const group = extractGroup(latex, idx);
             return { ...group, isGroup: true };
         } else if (latex[idx] === '\\') {
-            // Command like \alpha or \frac
-            // Find end of command
             let end = idx + 1;
             while (end < latex.length && /[a-zA-Z]/.test(latex[end])) {
                 end++;
@@ -56,49 +58,35 @@ function parseLatexNodes(latex) {
             continue;
         }
 
+        // Superscript/Subscript Handling
         if (char === '^' || char === '_') {
-            // These should have been handled by the PREVIOUS node if strictly following AST, 
-            // but since we are linear, we encounter them after the base.
-            // In docx, we need to wrap the base. 
-            // This suggests we should have a "current base" approach or post-process.
-            // Let's rely on looking ahead method? No, look BACK.
-
-            // Pop the last node to be the base.
             let base = nodes.pop();
-            // If no base (e.g. start of string), implicit base? (empty)
             if (!base) base = new MathRun("");
 
             const isSuper = char === '^';
             const nextInfo = getNextUnit(i + 1);
-            if (!nextInfo) break; // formatting error
+            if (!nextInfo) break;
 
-            let scriptContent = nextInfo.content;
-            // If it was a group {..}, we parse inside. If command, we use it. If char, use it.
-            // But for recursive parsing, we need to parse the content if it's a group OR simply pass it?
-            // Ideally we recursively parse the script content.
-
-            const scriptChildren = parseLatexNodes(scriptContent);
+            const scriptChildren = parseLatexNodes(nextInfo.content);
             i = nextInfo.endIndex;
 
-            if (isSuper) {
-                nodes.push(new MathSuperScript({
-                    children: Array.isArray(base) ? base : [base], // docx expects children for base? 
-                    // Wait, docs say: new MathSuperScript({ children: [base], superScript: [exp] })
-                    superScript: scriptChildren
-                }));
-            } else {
-                nodes.push(new MathSubScript({
-                    children: Array.isArray(base) ? base : [base],
-                    subScript: scriptChildren
-                }));
-            }
+            const ScriptClass = isSuper ? MathSuperScript : MathSubScript;
+            const scriptProp = isSuper ? { superScript: scriptChildren } : { subScript: scriptChildren };
+
+            // Note: docx MathSuperScript/SubScript expects 'children' for the base property.
+            nodes.push(new ScriptClass({
+                children: Array.isArray(base) ? base : [base],
+                ...scriptProp
+            }));
             continue;
         }
 
+        // Command Handling
         if (char === '\\') {
             const remaining = latex.slice(i);
+
             if (remaining.startsWith('\\frac')) {
-                i += 5;
+                i += 5; // length of \frac
                 const num = getNextUnit(i);
                 i = num.endIndex;
                 const den = getNextUnit(i);
@@ -111,21 +99,18 @@ function parseLatexNodes(latex) {
                 continue;
             }
             else if (remaining.startsWith('\\sqrt')) {
-                i += 5;
-                // sqrt usually takes an optional [n] and mandatory {arg}
-                // Check if [ appears
-                // Simple implementation: Just {arg}
+                i += 5; // length of \sqrt
                 const rad = getNextUnit(i);
                 i = rad.endIndex;
 
                 nodes.push(new MathRadical({
                     children: parseLatexNodes(rad.content),
-                    degree: [] // Default square root
+                    degree: []
                 }));
                 continue;
             }
             else {
-                // Check simple symbols
+                // Generic Symbol or Command
                 let end = i + 1;
                 while (end < latex.length && /[a-zA-Z]/.test(latex[end])) {
                     end++;
@@ -135,9 +120,7 @@ function parseLatexNodes(latex) {
                 if (LATEX_SYMBOLS[cmd]) {
                     nodes.push(new MathRun(LATEX_SYMBOLS[cmd]));
                 } else {
-                    // Unknown command, just dump it as text or try to guess?
-                    // e.g. \text{...}
-                    nodes.push(new MathRun(cmd)); // Keeps \cmd potentially readable
+                    nodes.push(new MathRun(cmd));
                 }
                 i = end;
                 continue;
@@ -145,23 +128,25 @@ function parseLatexNodes(latex) {
         }
 
         if (char === '{' || char === '}') {
-            // Should only appear as part of structure, if here it's likely stray or parsing error
             i++;
             continue;
         }
 
-        // Standard character
+        // Default Character
         nodes.push(new MathRun(char));
         i++;
     }
     return nodes;
 }
 
-// Helper to extract nested { ... }
+/**
+ * Extracts content within balanced curly braces.
+ * @param {string} str 
+ * @param {number} startIndex 
+ * @returns {{content: string, endIndex: number}}
+ */
 function extractGroup(str, startIndex) {
     let start = str.indexOf('{', startIndex);
-    // If not found at exactly startIndex (should be called when current is {), or found later...
-    // Actually getNextUnit logic ensures we call this when valid.
     if (start === -1) return { content: "", endIndex: startIndex + 1 };
 
     let depth = 1;
@@ -178,7 +163,11 @@ function extractGroup(str, startIndex) {
     };
 }
 
-
+/**
+ * Creates a docx Math object from a LaTeX string.
+ * @param {string} text 
+ * @returns {Math}
+ */
 const createMathParagraph = (text) => {
     const nodes = parseLatexNodes(text);
     return new Math({
@@ -186,10 +175,16 @@ const createMathParagraph = (text) => {
     });
 };
 
+/**
+ * Generates and downloads a Word Document (.docx).
+ * @param {string} content - Markdown/LaTeX content.
+ * @param {string} filename 
+ */
 export const generateWordDocument = async (content, filename = "Math_Questions") => {
     const lines = content.split('\n');
 
     const docChildren = lines.map(line => {
+        // Heading detection (Markdown style)
         if (line.startsWith('## ')) {
             return new Paragraph({
                 children: [new TextRun({ text: line.replace('## ', ''), bold: true, size: 32 })],
@@ -197,9 +192,11 @@ export const generateWordDocument = async (content, filename = "Math_Questions")
             });
         }
 
+        // Split text by inline math delimiters $...$
         const parts = line.split(/\$([^$]+)\$/g);
 
         const paragraphChildren = parts.map((part, index) => {
+            // Odd indices are math content
             if (index % 2 === 1) {
                 return createMathParagraph(part);
             } else {
