@@ -45,6 +45,7 @@ function App() {
         if (isAuthenticated && apiKey) {
             checkConnection();
         }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [isAuthenticated, apiKey]);
 
     // --- Handlers ---
